@@ -1,0 +1,8 @@
+## Interface: 20506, 20505
+## Title: Arena Combat Log
+## Notes: Minimap button + GUI to toggle combat logging for TBC Arena Logs. Click the icon.
+## Author: Dotkill
+## Version: 1.1.0
+## SavedVariables: ArenaCombatLogDB
+
+ArenaCombatLog.lua

@@ -1,9 +1,12 @@
 --[[
   ArenaCombatLog — minimap button + GUI for TBC Arena Logs.
 
-  Click the minimap icon to open the panel.
+  By default, combat logging turns ON only inside arenas and OFF everywhere
+  else (Shattrath, world, etc.). Manual Start/Stop still force the logger
+  until the next zone change re-syncs auto mode.
+
   Left-click icon  = open/close GUI
-  Right-click icon = quick toggle logging
+  Right-click icon = force toggle logging (temporary until next zone)
 ]]
 
 local PREFIX = "|cff66bbffArena Combat Log|r"
@@ -17,6 +20,7 @@ local db
 local panel
 local miniBtn
 local refreshAll
+local SyncArenaLogging  -- fwd
 
 local function EnsureDB()
   ArenaCombatLogDB = ArenaCombatLogDB or {}
@@ -27,6 +31,21 @@ local function EnsureDB()
   if db.minimapHide == nil then
     db.minimapHide = false
   end
+  -- Default: only write combat log while inside an arena.
+  if db.arenaOnly == nil then
+    db.arenaOnly = true
+  end
+end
+
+local function InArena()
+  local _, instanceType = IsInInstance()
+  if instanceType == "arena" then
+    return true
+  end
+  if type(IsActiveBattlefieldArena) == "function" and IsActiveBattlefieldArena() then
+    return true
+  end
+  return false
 end
 
 local function IsLogging()
@@ -36,23 +55,41 @@ local function IsLogging()
   return LoggingCombat() and true or false
 end
 
-local function SetLogging(on)
+local function SetLogging(on, quiet)
   if type(LoggingCombat) ~= "function" then
-    print(PREFIX .. ": LoggingCombat() is not available on this client.")
+    if not quiet then
+      print(PREFIX .. ": LoggingCombat() is not available on this client.")
+    end
     return false
   end
-  LoggingCombat(on and true or false)
+  local want = on and true or false
+  local cur = IsLogging()
+  if cur == want then
+    if refreshAll then refreshAll() end
+    return cur
+  end
+  LoggingCombat(want)
   if refreshAll then
     refreshAll()
   end
-  local state = IsLogging() and "|cff88ff88ON|r" or "|cffff8888OFF|r"
-  print(PREFIX .. ": combat logging " .. state)
+  if not quiet then
+    local state = IsLogging() and "|cff88ff88ON|r" or "|cffff8888OFF|r"
+    local where = InArena() and " (arena)" or " (out of arena)"
+    print(PREFIX .. ": combat logging " .. state .. where)
+  end
   return IsLogging()
 end
 
 local function ToggleLogging()
-  local on = IsLogging()
-  return SetLogging(not on)
+  return SetLogging(not IsLogging())
+end
+
+-- Keep LoggingCombat() aligned with arena presence when arena-only mode is on.
+SyncArenaLogging = function(quiet)
+  if not db or not db.arenaOnly then
+    return
+  end
+  SetLogging(InArena(), quiet ~= false)
 end
 
 -- =====================================================================
@@ -64,7 +101,7 @@ local function EnsurePanel()
   end
 
   local f = CreateFrame("Frame", "ArenaCombatLogPanel", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-  f:SetSize(420, 290)
+  f:SetSize(420, 320)
   f:SetPoint("CENTER", UIParent, "CENTER", 0, 80)
   f:SetMovable(true)
   f:EnableMouse(true)
@@ -90,7 +127,7 @@ local function EnsurePanel()
   local subtitle = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
   subtitle:SetTextColor(0.65, 0.7, 0.78)
-  subtitle:SetText("For TBC Arena Logs — turn this on before you queue.")
+  subtitle:SetText("Auto-logs arenas only — off in the world / city.")
 
   local closeX = CreateFrame("Button", nil, f, "UIPanelCloseButton")
   closeX:SetPoint("TOPRIGHT", 2, 2)
@@ -116,9 +153,28 @@ local function EnsurePanel()
   statusText:SetPoint("CENTER")
   f.statusText = statusText
 
+  -- Arena-only checkbox
+  local autoCheck = CreateFrame("CheckButton", "ArenaCombatLogAutoCheck", f, "UICheckButtonTemplate")
+  autoCheck:SetPoint("TOPLEFT", statusBg, "BOTTOMLEFT", -4, -10)
+  autoCheck:SetSize(24, 24)
+  local autoLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+  autoLabel:SetPoint("LEFT", autoCheck, "RIGHT", 4, 0)
+  autoLabel:SetText("Only log arenas (auto on/off)")
+  autoCheck:SetScript("OnClick", function(self)
+    db.arenaOnly = self:GetChecked() and true or false
+    if db.arenaOnly then
+      SyncArenaLogging(false)
+      print(PREFIX .. ": arena-only mode |cff88ff88ON|r")
+    else
+      print(PREFIX .. ": arena-only mode |cffff8888OFF|r — use Start/Stop manually")
+    end
+    refreshAll()
+  end)
+  f.autoCheck = autoCheck
+
   -- Path box
   local pathLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  pathLabel:SetPoint("TOPLEFT", statusBg, "BOTTOMLEFT", 0, -14)
+  pathLabel:SetPoint("TOPLEFT", autoCheck, "BOTTOMLEFT", 4, -12)
   pathLabel:SetText("Where WoW saves the log")
 
   local pathBox = CreateFrame("Frame", nil, f, BackdropTemplateMixin and "BackdropTemplate" or nil)
@@ -150,9 +206,8 @@ local function EnsurePanel()
   note:SetJustifyH("LEFT")
   note:SetJustifyV("TOP")
   note:SetWordWrap(true)
-  note:SetText("One session file on disk. The TBC Arena Logs web app splits each arena into its own match.")
+  note:SetText("With arena-only on, Start/Stop is a temporary override until you change zones. TBC Arena Logs still splits each fight.")
 
-  -- Buttons sit below the note with clear clearance (not overlapping it).
   local startBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
   startBtn:SetSize(150, 28)
   startBtn:SetPoint("TOPLEFT", note, "BOTTOMLEFT", 0, -16)
@@ -177,21 +232,28 @@ local function EnsurePanel()
   printBtn:SetText("Chat info")
   printBtn:SetScript("OnClick", function()
     local on = IsLogging()
-    print(PREFIX .. ": " .. (on and "|cff88ff88ON|r" or "|cffff8888OFF|r"))
+    print(PREFIX .. ": " .. (on and "|cff88ff88ON|r" or "|cffff8888OFF|r")
+      .. (db.arenaOnly and " | arena-only" or " | manual")
+      .. (InArena() and " | in arena" or ""))
     print("  " .. LOG_DIR .. LOG_FILE)
   end)
 
   function f:Refresh()
+    if self.autoCheck then
+      self.autoCheck:SetChecked(db.arenaOnly and true or false)
+    end
     local on = IsLogging()
     if on then
-      self.statusText:SetText("|cff88ff88LOGGING ON|r")
+      local label = db.arenaOnly and "|cff88ff88LOGGING ON|r  (arena)" or "|cff88ff88LOGGING ON|r"
+      self.statusText:SetText(label)
       if self.statusBg.SetBackdropColor then
         self.statusBg:SetBackdropColor(0.08, 0.28, 0.12, 0.95)
       end
       self.startBtn:Disable()
       self.stopBtn:Enable()
     elseif on == false then
-      self.statusText:SetText("|cffff8888LOGGING OFF|r")
+      local label = db.arenaOnly and "|cffff8888LOGGING OFF|r  (waiting for arena)" or "|cffff8888LOGGING OFF|r"
+      self.statusText:SetText(label)
       if self.statusBg.SetBackdropColor then
         self.statusBg:SetBackdropColor(0.28, 0.08, 0.08, 0.95)
       end
@@ -311,9 +373,14 @@ local function EnsureMinimapButton()
     else
       GameTooltip:AddLine("Status: |cffff8888LOGGING OFF|r", 1, 1, 1)
     end
+    if db.arenaOnly then
+      GameTooltip:AddLine("Mode: arena-only (auto)", 0.7, 0.85, 1)
+    else
+      GameTooltip:AddLine("Mode: manual", 1, 0.85, 0.5)
+    end
     GameTooltip:AddLine(" ")
     GameTooltip:AddLine("|cffaaaaaaLeft-click:|r open panel", 0.8, 0.8, 0.8)
-    GameTooltip:AddLine("|cffaaaaaaRight-click:|r start/stop logging", 0.8, 0.8, 0.8)
+    GameTooltip:AddLine("|cffaaaaaaRight-click:|r force start/stop", 0.8, 0.8, 0.8)
     GameTooltip:AddLine("|cffaaaaaaDrag:|r move button", 0.8, 0.8, 0.8)
     GameTooltip:Show()
   end)
@@ -334,9 +401,7 @@ local function EnsureMinimapButton()
 end
 
 refreshAll = function()
-  if panel and panel:IsShown() then
-    panel:Refresh()
-  elseif panel then
+  if panel then
     panel:Refresh()
   end
   UpdateMinimapLook()
@@ -355,6 +420,15 @@ SlashCmdList["ARENACOMBATLOG"] = function(msg)
   elseif msg == "off" or msg == "stop" then
     SetLogging(false)
     ShowPanel(true)
+  elseif msg == "auto" or msg == "arena" then
+    db.arenaOnly = true
+    SyncArenaLogging(false)
+    print(PREFIX .. ": arena-only mode |cff88ff88ON|r")
+    refreshAll()
+  elseif msg == "manual" then
+    db.arenaOnly = false
+    print(PREFIX .. ": arena-only mode |cffff8888OFF|r — use Start/Stop")
+    refreshAll()
   elseif msg == "minimap" then
     db.minimapHide = not db.minimapHide
     if miniBtn then
@@ -368,10 +442,19 @@ end
 
 local boot = CreateFrame("Frame")
 boot:RegisterEvent("PLAYER_LOGIN")
-boot:SetScript("OnEvent", function()
-  EnsureDB()
-  EnsureMinimapButton()
-  EnsurePanel()
-  refreshAll()
-  print(PREFIX .. " ready — click the |cffffffffminimap book icon|r (green = logging on).")
+boot:RegisterEvent("PLAYER_ENTERING_WORLD")
+boot:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+boot:SetScript("OnEvent", function(_, event)
+  if event == "PLAYER_LOGIN" then
+    EnsureDB()
+    EnsureMinimapButton()
+    EnsurePanel()
+    -- If someone left logging on from an old session, shut it off outside arena.
+    SyncArenaLogging(true)
+    refreshAll()
+    print(PREFIX .. " ready — |cffffffffarena-only|r auto-log (minimap book icon).")
+  else
+    -- Entering / leaving instances (including arenas).
+    SyncArenaLogging(false)
+  end
 end)
